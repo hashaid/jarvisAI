@@ -6,7 +6,34 @@ import time
 import queue
 import platform
 import json
+import pickle
 from pathlib import Path
+import re
+import webbrowser
+import pyautogui
+import requests
+import psutil
+import datetime
+import random
+import winsound
+
+# Проверка и установка numpy
+try:
+    import numpy as np
+except ImportError:
+    print("Установка numpy...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy"])
+    import numpy as np
+
+# Проверка и установка scikit-learn
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+except ImportError:
+    print("Установка scikit-learn...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn"])
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
 
 # Автоматическая установка всех зависимостей
 def install_dependencies():
@@ -20,7 +47,9 @@ def install_dependencies():
         'pycaw',
         'comtypes',
         'pyaudio',
-        'python-dateutil'
+        'python-dateutil',
+        'scikit-learn',
+        'numpy'
     ]
     
     print("Установка необходимых зависимостей...")
@@ -45,6 +74,24 @@ def install_dependencies():
             subprocess.check_call([sys.executable, "-m", "pip", "install", "PyAudio"])
         except:
             print("Не удалось установить PyAudio. Голосовые команды недоступны.")
+    
+    # Установка SAPI5 голосов для Windows
+    if platform.system() == "Windows":
+        print("Проверка голосовых движков...")
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Speech\Voices")
+            voices_found = False
+            for i in range(winreg.QueryInfoKey(key)[0]):
+                voice_name = winreg.EnumKey(key, i)
+                if "Russian" in voice_name:
+                    voices_found = True
+                    break
+            
+            if not voices_found:
+                print("Русские голоса не найдены. Попробуйте установить их вручную через настройки Windows.")
+        except:
+            print("Не удалось проверить голосовые движки. Убедитесь, что установлены русские голоса SAPI5.")
 
 # Установка зависимостей перед импортом остальных модулей
 install_dependencies()
@@ -52,15 +99,8 @@ install_dependencies()
 # Теперь импортируем остальные модули
 import speech_recognition as sr
 import pyttsx3
-import webbrowser
-import pyautogui
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, ttk, PhotoImage
-import requests
-import psutil
-import datetime
-import random
-import re
 from ctypes import cast, POINTER
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
@@ -70,6 +110,8 @@ from dateutil.relativedelta import relativedelta
 CONFIG_FILE = "jarvis_config.json"
 HISTORY_FILE = "jarvis_history.json"
 NOTES_FILE = "jarvis_notes.txt"
+KNOWLEDGE_FILE = "jarvis_knowledge.pkl"
+PERSONALITY_FILE = "jarvis_personality.json"
 
 # Загрузка конфигурации
 def load_config():
@@ -77,13 +119,24 @@ def load_config():
         "voice_rate": 185,
         "voice_pitch": 110,
         "hotword": "джарвис",
-        "ai_provider": "deepseek",
-        "deepseek_api_key": "sk-9b2c0e0d7d2845c1b8c7f1a6e6f8a3c0"
+        "user_name": "Сэр",
+        "ai_provider": "local",
+        "deepseek_api_key": "",
+        "learn_from_commands": True,
+        "always_listen": True,
+        "password": "jarvis",
+        "sequence_mode": False,
+        "sequence_commands": []
     }
     
     try:
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
+            user_config = json.load(f)
+            # Объединение с дефолтными настройками для новых ключей
+            for key, value in default_config.items():
+                if key not in user_config:
+                    user_config[key] = value
+            return user_config
     except FileNotFoundError:
         return default_config
 
@@ -108,13 +161,149 @@ def save_history(history):
 # Загрузка конфигурации
 config = load_config()
 
+# ===== Локальный ИИ с обучением =====
+class LocalAI:
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer()
+        self.knowledge = []
+        self.patterns = []
+        self.responses = []
+        self.load_knowledge()
+        
+        # Загрузка личности
+        self.load_personality()
+    
+    def load_personality(self):
+        default_personality = {
+            "name": "Jarvis",
+            "greetings": [
+                "Приветствую, {user_name}. Чем могу быть полезен?",
+                "Здравствуйте, {user_name}. Система готова к работе.",
+                "Добрый день, {user_name}. Ожидаю ваших указаний."
+            ],
+            "farewells": [
+                "До свидания, {user_name}. Всегда к вашим услугам.",
+                "Завершаю работу. Обращайтесь, если понадоблюсь.",
+                "Отключаю системы. До новых встреч."
+            ],
+            "jokes": [
+                "Почему программисты путают Хэллоуин и Рождество? Потому что Oct 31 == Dec 25!",
+                "Сколько программистов нужно, чтобы поменять лампочку? Ни одного, это аппаратная проблема!",
+                "Что говорит программист, когда ему нужно в туалет? 'Я пойду пофиксю баги'",
+                "Почему программисты такие плохие водители? Потому что они всегда ищут баги на дороге!",
+                "Как называют программиста, который не боится работы? Фуллстек!"
+            ],
+            "personality_traits": {
+                "humor_level": 5,
+                "formality_level": 7,
+                "patience_level": 8
+            }
+        }
+        
+        try:
+            with open(PERSONALITY_FILE, 'r') as f:
+                self.personality = json.load(f)
+        except:
+            self.personality = default_personality
+            with open(PERSONALITY_FILE, 'w') as f:
+                json.dump(default_personality, f, indent=4)
+    
+    def save_personality(self):
+        with open(PERSONALITY_FILE, 'w') as f:
+            json.dump(self.personality, f, indent=4)
+    
+    def train(self, pattern, response):
+        """Добавление нового знания в ИИ"""
+        self.patterns.append(pattern.lower())
+        self.responses.append(response)
+        # Переобучаем векторизатор на всех шаблонах
+        if self.patterns:
+            self.vectorizer.fit(self.patterns)
+        self.save_knowledge()
+    
+    def save_knowledge(self):
+        """Сохранение знаний в файл"""
+        knowledge = {
+            "patterns": self.patterns,
+            "responses": self.responses
+        }
+        with open(KNOWLEDGE_FILE, 'wb') as f:
+            pickle.dump(knowledge, f)
+    
+    def load_knowledge(self):
+        """Загрузка знаний из файла"""
+        try:
+            with open(KNOWLEDGE_FILE, 'rb') as f:
+                knowledge = pickle.load(f)
+                self.patterns = knowledge["patterns"]
+                self.responses = knowledge["responses"]
+                
+                # Обучение векторизатора
+                if self.patterns:
+                    self.vectorizer.fit(self.patterns)
+        except:
+            # Начальные знания
+            self.patterns = [
+                "привет",
+                "как дела",
+                "что ты умеешь",
+                "спасибо",
+                "расскажи о себе"
+            ]
+            self.responses = [
+                "Здравствуйте, {user_name}. Чем могу помочь?",
+                "Всё функционирует в пределах нормы, {user_name}. Спасибо, что интересуетесь.",
+                "Я могу выполнять различные команды: открывать приложения, искать информацию, управлять системой и многое другое. Спросите 'Что ты умеешь?' для подробностей.",
+                "Всегда пожалуйста, {user_name}. Обращайтесь, если понадоблюсь.",
+                "Я - Jarvis, ваш персональный ассистент. Моя задача - помогать вам в решении повседневных задач и управлении компьютером."
+            ]
+            # Обучаем векторизатор на начальных знаниях
+            if self.patterns:
+                self.vectorizer.fit(self.patterns)
+            self.save_knowledge()
+    
+    def respond(self, query, user_name):
+        """Генерация ответа на запрос"""
+        # Проверка точных соответствий
+        if query.lower() in self.patterns:
+            idx = self.patterns.index(query.lower())
+            return self.responses[idx].format(user_name=user_name)
+        
+        # Поиск похожих вопросов
+        if self.patterns:
+            query_vec = self.vectorizer.transform([query.lower()])
+            pattern_vecs = self.vectorizer.transform(self.patterns)
+            similarities = cosine_similarity(query_vec, pattern_vecs)
+            max_idx = np.argmax(similarities)
+            
+            if similarities[0, max_idx] > 0.6:
+                return self.responses[max_idx].format(user_name=user_name)
+        
+        # Генерация ответа на основе личности
+        traits = self.personality["personality_traits"]
+        
+        if traits["humor_level"] > 7 and random.random() > 0.7:
+            return random.choice(self.personality["jokes"])
+        
+        responses = [
+            f"Понял вас, {user_name}. Но я еще учусь отвечать на такие вопросы.",
+            f"Интересный вопрос, {user_name}. Пока я не могу на него ответить, но я запомню его для изучения.",
+            f"Простите, {user_name}, я еще не научился отвечать на такие запросы.",
+            f"Моя текущая версия не поддерживает ответ на этот вопрос, {user_name}."
+        ]
+        
+        return random.choice(responses)
+
+# Инициализация локального ИИ
+local_ai = LocalAI()
+
 # ===== ИИ-провайдеры =====
 def ask_ai(prompt):
     """Запрос к ИИ"""
-    if config["ai_provider"] == "deepseek":
+    if config["ai_provider"] == "deepseek" and config["deepseek_api_key"]:
         return ask_deepseek(prompt)
     else:
-        return "ИИ-провайдер не настроен"
+        return local_ai.respond(prompt, config["user_name"])
 
 def ask_deepseek(prompt):
     """Запрос к DeepSeek AI"""
@@ -171,21 +360,30 @@ def setup_jarvis_voice():
         print("Используется стандартный голос")
         # Попробуем установить русский голос
         for voice in voices:
-            if 'russian' in voice.languages or 'ru' in voice.languages:
+            lang = getattr(voice, 'languages', None)
+            if lang and ('ru' in lang[0].lower() or 'rus' in lang[0].lower()):
                 engine.setProperty('voice', voice.id)
+                print(f"Используется русский голос: {voice.name}")
                 break
     
     # Настройки голоса для эффекта Jarvis
     engine.setProperty('rate', config["voice_rate"])
     engine.setProperty('volume', 1.0)
-    engine.setProperty('pitch', config["voice_pitch"])
+    try:
+        engine.setProperty('pitch', config["voice_pitch"])
+    except:
+        print("Предупреждение: настройка pitch не поддерживается текущим голосовым движком")
     
     return engine
 
-engine = setup_jarvis_voice()
+engine = None  # Будет инициализирован позже
 
 def speak(text):
     """Озвучивание текста с эффектом Jarvis"""
+    global engine
+    if engine is None:
+        engine = setup_jarvis_voice()
+    
     print(f"JARVIS: {text}")
     
     try:
@@ -231,6 +429,42 @@ def listen():
     except Exception as e:
         print(f"Ошибка микрофона: {e}")
         return "Ошибка микрофона. Проверьте подключение."
+
+# ===== Фоновое прослушивание для горячего слова =====
+class BackgroundListener(threading.Thread):
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+        self.running = True
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 1.0
+        self.recognizer.energy_threshold = 3000
+        self.recognizer.dynamic_energy_threshold = True
+        self.microphone = sr.Microphone()
+        self.daemon = True
+    
+    def run(self):
+        with self.microphone as source:
+            self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
+            print("Фоновое прослушивание запущено...")
+            
+            while self.running:
+                try:
+                    audio = self.recognizer.listen(source, timeout=3, phrase_time_limit=3)
+                    text = self.recognizer.recognize_google(audio, language="ru-RU").lower()
+                    if config["hotword"] in text:
+                        self.callback(text)
+                except sr.WaitTimeoutError:
+                    pass
+                except sr.UnknownValueError:
+                    pass
+                except Exception as e:
+                    if self.running:  # Игнорировать ошибки при остановке
+                        print(f"Ошибка фонового прослушивания: {e}")
+    
+    def stop(self):
+        self.running = False
+        print("Фоновое прослушивание остановлено")
 
 # ===== Расширенные функции Jarvis =====
 def open_website(url):
@@ -367,14 +601,7 @@ def get_date():
     return f"Сегодня {now.day} {months[now.month]} {now.year} года"
 
 def tell_joke():
-    jokes = [
-        "Почему программисты путают Хэллоуин и Рождество? Потому что Oct 31 == Dec 25!",
-        "Сколько программистов нужно, чтобы поменять лампочку? Ни одного, это аппаратная проблема!",
-        "Что говорит программист, когда ему нужно в туалет? 'Я пойду пофиксю баги'",
-        "Почему программисты такие плохие водители? Потому что они всегда ищут баги на дороге!",
-        "Как называют программиста, который не боится работы? Фуллстек!"
-    ]
-    return random.choice(jokes)
+    return random.choice(local_ai.personality["jokes"])
 
 def set_volume(level):
     """Установка громкости системы"""
@@ -403,6 +630,95 @@ def get_weather(city="Москва"):
     except:
         return "Ошибка подключения к сервису погоды"
 
+def type_text(text):
+    """Печать текста"""
+    pyautogui.typewrite(text)
+    return f"Напечатано: {text}"
+
+def press_key(key):
+    """Нажатие клавиши"""
+    pyautogui.press(key)
+    return f"Нажата клавиша: {key}"
+
+def send_message(text):
+    """Отправка сообщения"""
+    pyautogui.typewrite(text)
+    pyautogui.press("enter")
+    return f"Сообщение отправлено: {text}"
+
+def maximize_window():
+    """Максимизация текущего окна"""
+    pyautogui.hotkey('win', 'up')
+    return "Текущее окно максимизировано"
+
+def minimize_window():
+    """Минимизация текущего окна"""
+    pyautogui.hotkey('win', 'down')
+    return "Текущее окно минимизировано"
+
+def switch_window():
+    """Переключение между окнами"""
+    pyautogui.hotkey('alt', 'tab')
+    return "Переключение между окнами"
+
+def remember_this(text):
+    """Запоминание информации"""
+    fact = text.replace("запомни что", "").strip()
+    local_ai.train(f"что такое {fact.split()[0]}", fact)
+    return f"Запомнил: {fact}"
+
+def search_files(filename):
+    """Поиск файлов на компьютере"""
+    try:
+        # Для Windows
+        if platform.system() == "Windows":
+            result = subprocess.run(['dir', filename, '/s', '/b'], 
+                                   capture_output=True, text=True, shell=True)
+            files = result.stdout.splitlines()
+            
+            if files:
+                return f"Найдены файлы:\n" + "\n".join(files[:5]) + ("\n..." if len(files) > 5 else "")
+            else:
+                return "Файлы не найдены"
+        # Для Linux/MacOS
+        else:
+            result = subprocess.run(['find', '-name', filename], 
+                                   capture_output=True, text=True)
+            files = result.stdout.splitlines()
+            
+            if files:
+                return f"Найдены файлы:\n" + "\n".join(files[:5]) + ("\n..." if len(files) > 5 else "")
+            else:
+                return "Файлы не найдены"
+    except:
+        return "Ошибка поиска файлов"
+
+def play_activation_sound():
+    """Звук активации Jarvis"""
+    try:
+        winsound.Beep(1000, 200)  # Высокий звук
+        winsound.Beep(1200, 150)
+    except:
+        # Для не-Windows систем
+        try:
+            import os
+            os.system('echo -e "\a"')
+        except:
+            pass
+
+def play_deactivation_sound():
+    """Звук деактивации Jarvis"""
+    try:
+        winsound.Beep(800, 200)  # Низкий звук
+        winsound.Beep(600, 150)
+    except:
+        # Для не-Windows систем
+        try:
+            import os
+            os.system('echo -e "\a"')
+        except:
+            pass
+
 # ===== Расширенный обработчик команд =====
 def handle_command(command, history):
     if not command:
@@ -417,13 +733,26 @@ def handle_command(command, history):
     })
     save_history(history)
     
+    # Если включено обучение, добавляем команду в ИИ
+    if config["learn_from_commands"]:
+        # Формируем ответ на основе предыдущих ответов
+        response, _ = handle_command_internal(command, history.copy())
+        local_ai.train(command, response)
+    
+    # Обработка команды
+    return handle_command_internal(command, history)
+
+def handle_command_internal(command, history):
+    command_lower = command.lower()
+    
     # Проверка на горячее слово
     if config["hotword"] and config["hotword"] in command_lower:
         command_lower = command_lower.replace(config["hotword"], "").strip()
     
     # Приветствие
     if any(word in command_lower for word in ["привет", "здравствуй", "добрый день"]):
-        return "Здравствуйте, сэр. Чем могу помочь?", history
+        greeting = random.choice(local_ai.personality["greetings"])
+        return greeting.format(user_name=config["user_name"]), history
     
     # Системные команды
     elif any(cmd in command_lower for cmd in ["выключи компьютер", "перезагрузи компьютер", "режим сна", "заблокируй компьютер"]):
@@ -452,7 +781,9 @@ def handle_command(command, history):
             "почту": "https://gmail.com",
             "новости": "https://news.google.com",
             "переводчик": "https://translate.google.com",
-            "карты": "https://maps.google.com"
+            "карты": "https://maps.google.com",
+            "яндекс": "https://yandex.ru",
+            "соцсети": "https://facebook.com"
         }
         
         for site_name, site_url in sites.items():
@@ -545,6 +876,60 @@ def handle_command(command, history):
             return ask_ai(question), history
         return "Что спросить у ИИ?", history
     
+    # Печать текста
+    elif "напечатай" in command_lower:
+        text = command_lower.replace("напечатай", "").strip()
+        if text:
+            return type_text(text), history
+        return "Что напечатать?", history
+    
+    # Отправка сообщения
+    elif "отправь сообщение" in command_lower:
+        text = command_lower.replace("отправь сообщение", "").strip()
+        if text:
+            return send_message(text), history
+        return "Какое сообщение отправить?", history
+    
+    # Управление окнами
+    elif "максимизируй окно" in command_lower:
+        return maximize_window(), history
+    
+    elif "минимизируй окно" in command_lower:
+        return minimize_window(), history
+    
+    elif "переключи окно" in command_lower:
+        return switch_window(), history
+    
+    # Поиск файлов
+    elif "найди файл" in command_lower:
+        filename = command_lower.replace("найди файл", "").strip()
+        if filename:
+            return search_files(filename), history
+        return "Какой файл найти?", history
+    
+    # Запоминание информации
+    elif "запомни что" in command_lower:
+        return remember_this(command_lower), history
+    
+    # Последовательность команд
+    elif "начать последовательность команд" in command_lower:
+        config["sequence_mode"] = True
+        config["sequence_commands"] = []
+        save_config(config)
+        return "Режим последовательности команд активирован. Ожидаю команды...", history
+    
+    elif "завершить последовательность команд" in command_lower:
+        config["sequence_mode"] = False
+        save_config(config)
+        return "Режим последовательности команд завершен.", history
+    
+    elif "отмени команду" in command_lower:
+        if config["sequence_commands"]:
+            removed = config["sequence_commands"].pop()
+            save_config(config)
+            return f"Команда '{removed}' отменена. Осталось команд: {len(config['sequence_commands'])}", history
+        return "Нет команд для отмены.", history
+    
     # Помощь
     elif "что ты умеешь" in command_lower or "список команд" in command_lower:
         return (
@@ -558,7 +943,14 @@ def handle_command(command, history):
             "- Устанавливать будильники\n"
             "- Рассказывать анекдоты\n"
             "- Управлять громкостью\n"
-            "- Отвечать на вопросы с помощью ИИ\n"
+            "- Отвечать на вопросы\n"
+            "- Печатать текст\n"
+            "- Отправлять сообщения\n"
+            "- Управлять окнами\n"
+            "- Искать файлы\n"
+            "- Запоминать информацию\n"
+            "- Выполнять последовательности команд\n"
+            "- Отменять последнюю команду\n"
             "- И многое другое. Просто спросите!"
         ), history
     
@@ -572,21 +964,151 @@ def handle_command(command, history):
     
     # Остановка работы
     elif any(word in command_lower for word in ["стоп", "выход", "закончи", "пока"]):
-        return "exit", history
+        farewell = random.choice(local_ai.personality["farewells"])
+        return f"exit||{farewell.format(user_name=config['user_name'])}", history
     
-    # Общие вопросы к ИИ
+    # Общие вопросы
     elif any(word in command_lower for word in ["почему", "как", "что", "кто", "где", "зачем"]):
         return ask_ai(command), history
     
     # Непонятная команда
     else:
-        return "Я не понял команду. Попробуйте ещё раз.", history
+        return ask_ai(command), history
+
+# ===== ЭКРАН ЗАГРУЗКИ =====
+class SplashScreen:
+    def __init__(self, master):
+        self.master = master
+        self.window = tk.Toplevel(master)
+        self.window.title("J.A.R.V.I.S. Loading")
+        self.window.geometry("400x300")
+        self.window.overrideredirect(True)  # Убираем рамки окна
+        screen_width = self.window.winfo_screenwidth()
+        screen_height = self.window.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 300) // 2
+        self.window.geometry(f"400x300+{x}+{y}")
+        self.window.configure(bg="#0a0a2a")
+        
+        # Логотип
+        self.logo = ttk.Label(
+            self.window, 
+            text="J.A.R.V.I.S.", 
+            font=("Arial", 28, "bold"),
+            foreground="#00ccff",
+            background="#0a0a2a"
+        )
+        self.logo.pack(pady=50)
+        
+        # Индикатор загрузки
+        self.progress = ttk.Progressbar(
+            self.window,
+            orient="horizontal",
+            length=300,
+            mode="indeterminate"
+        )
+        self.progress.pack(pady=20)
+        self.progress.start(10)
+        
+        # Статус загрузки
+        self.status = ttk.Label(
+            self.window,
+            text="Инициализация системы...",
+            font=("Arial", 10),
+            foreground="#00ff00",
+            background="#0a0a2a"
+        )
+        self.status.pack(pady=10)
+        
+    def update_status(self, text):
+        self.status.config(text=text)
+        self.window.update()
+        
+    def destroy(self):
+        self.window.destroy()
+
+# ===== ЭКРАН ВХОДА =====
+class LoginScreen:
+    def __init__(self, master, on_login_success):
+        self.master = master
+        self.on_login_success = on_login_success
+        self.window = tk.Toplevel(master)
+        self.window.title("J.A.R.V.I.S. - Вход")
+        self.window.geometry("400x300")
+        self.window.configure(bg="#0a0a2a")
+        self.window.transient(master)
+        self.window.grab_set()
+        self.window.protocol("WM_DELETE_WINDOW", self.master.destroy)
+        
+        screen_width = self.window.winfo_screenwidth()
+        screen_height = self.window.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 300) // 2
+        self.window.geometry(f"400x300+{x}+{y}")
+        
+        # Заголовок
+        ttk.Label(
+            self.window, 
+            text="J.A.R.V.I.S.", 
+            font=("Arial", 24, "bold"),
+            foreground="#00ccff",
+            background="#0a0a2a"
+        ).pack(pady=20)
+        
+        # Поля ввода
+        frame = ttk.Frame(self.window)
+        frame.pack(pady=20)
+        
+        ttk.Label(
+            frame, 
+            text="Пароль:", 
+            font=("Arial", 12),
+            foreground="#ffffff",
+            background="#0a0a2a"
+        ).grid(row=0, column=0, padx=5, pady=10)
+        
+        self.password_var = tk.StringVar()
+        self.password_entry = ttk.Entry(
+            frame, 
+            textvariable=self.password_var, 
+            show="*", 
+            width=20,
+            font=("Arial", 12)
+        )
+        self.password_entry.grid(row=0, column=1, padx=5, pady=10)
+        self.password_entry.bind("<Return>", self.check_password)
+        
+        # Кнопка входа
+        ttk.Button(
+            self.window,
+            text="Войти",
+            command=self.check_password,
+            width=15
+        ).pack(pady=10)
+        
+        # Статус
+        self.status_var = tk.StringVar()
+        ttk.Label(
+            self.window, 
+            textvariable=self.status_var,
+            foreground="#ff0000",
+            background="#0a0a2a",
+            font=("Arial", 10)
+        ).pack(pady=5)
+        
+    def check_password(self, event=None):
+        password = self.password_var.get()
+        if password == config.get("password", "jarvis"):
+            self.window.destroy()
+            self.on_login_success()
+        else:
+            self.status_var.set("Неверный пароль")
 
 # ===== Графический интерфейс Jarvis =====
 class JarvisGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("J.A.R.V.I.S. - Just A Rather Very Intelligent System")
+        self.root.title(f"J.A.R.V.I.S. - Just A Rather Very Intelligent System")
         self.root.geometry("900x700")
         self.root.configure(bg="#0a0a2a")
         
@@ -623,13 +1145,35 @@ class JarvisGUI:
         # Запуск проверки очереди
         self.root.after(100, self.process_queue)
         
+        # Фоновое прослушивание
+        self.background_listener = BackgroundListener(self.activate_from_hotword)
+        if config.get("always_listen", True):  # Используем безопасное получение значения
+            self.background_listener.start()
+    
     def create_widgets(self):
         # Главный фрейм
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
+        # Создаем Notebook (вкладки)
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Вкладка 1: Консоль
+        console_frame = ttk.Frame(self.notebook)
+        self.notebook.add(console_frame, text="Консоль")
+        
+        # Вкладка 2: Заметки
+        notes_frame = ttk.Frame(self.notebook)
+        self.notebook.add(notes_frame, text="Заметки")
+        
+        # Вкладка 3: История
+        history_frame = ttk.Frame(self.notebook)
+        self.notebook.add(history_frame, text="История")
+        
+        # ===== Содержимое вкладки Консоль =====
         # Заголовок
-        header_frame = ttk.Frame(main_frame)
+        header_frame = ttk.Frame(console_frame)
         header_frame.pack(fill=tk.X, pady=10)
         
         # Анимированный заголовок
@@ -653,12 +1197,12 @@ class JarvisGUI:
         status_bar.pack(fill=tk.X, pady=5)
         
         # Панель консоли
-        console_frame = ttk.LabelFrame(main_frame, text=" Консоль системы ")
-        console_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        console_panel_frame = ttk.LabelFrame(console_frame, text=" Консоль системы ")
+        console_panel_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # Текстовое поле для вывода
         self.console = scrolledtext.ScrolledText(
-            console_frame, 
+            console_panel_frame, 
             wrap=tk.WORD, 
             bg="#000033", 
             fg="#00ffff", 
@@ -675,7 +1219,7 @@ class JarvisGUI:
         self.console.configure(state=tk.DISABLED)
         
         # Панель управления
-        control_frame = ttk.Frame(main_frame)
+        control_frame = ttk.Frame(console_frame)
         control_frame.pack(fill=tk.X, pady=10)
         
         # Кнопки
@@ -697,7 +1241,7 @@ class JarvisGUI:
         
         self.ai_btn = ttk.Button(
             control_frame, 
-            text="🤖 Задать вопрос ИИ", 
+            text="🤖 Задать вопрос", 
             command=self.ask_ai_dialog,
             width=15
         )
@@ -718,6 +1262,72 @@ class JarvisGUI:
             width=15
         )
         self.exit_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # ===== Содержимое вкладки Заметки =====
+        # Текстовое поле для заметок
+        self.notes_text = scrolledtext.ScrolledText(
+            notes_frame,
+            wrap=tk.WORD,
+            bg="#000033",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            font=("Arial", 11)
+        )
+        self.notes_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Загружаем заметки
+        self.load_notes()
+        
+        # Кнопки
+        notes_btn_frame = ttk.Frame(notes_frame)
+        notes_btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(
+            notes_btn_frame,
+            text="Сохранить",
+            command=self.save_notes
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            notes_btn_frame,
+            text="Обновить",
+            command=self.load_notes
+        ).pack(side=tk.RIGHT, padx=5)
+        
+        # ===== Содержимое вкладки История =====
+        # Список истории
+        self.history_list = tk.Listbox(
+            history_frame,
+            bg="#000033",
+            fg="#00ff00",
+            font=("Arial", 11),
+            selectbackground="#0066cc",
+            selectforeground="#ffffff",
+            relief="flat"
+        )
+        scrollbar = ttk.Scrollbar(history_frame, orient="vertical", command=self.history_list.yview)
+        self.history_list.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.history_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Загружаем историю
+        self.load_history_list()
+        
+        # Кнопки
+        history_btn_frame = ttk.Frame(history_frame)
+        history_btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(
+            history_btn_frame,
+            text="Обновить",
+            command=self.load_history_list
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            history_btn_frame,
+            text="Очистить",
+            command=self.clear_history
+        ).pack(side=tk.RIGHT, padx=5)
         
     def animate_header(self):
         """Анимация заголовка в стиле Jarvis"""
@@ -760,10 +1370,53 @@ class JarvisGUI:
         
         if command:
             self.message_queue.put(("console", command, "USER"))
-            self.message_queue.put(("process_command", command))
+            
+            # Проверка на режим последовательности
+            if config.get("sequence_mode", False):
+                config["sequence_commands"].append(command)
+                save_config(config)
+                response = f"Команда добавлена в последовательность. Текущее количество: {len(config['sequence_commands'])}"
+                self.message_queue.put(("console", response))
+                self.message_queue.put(("speak", response))
+            else:
+                self.message_queue.put(("process_command", command))
         else:
             self.message_queue.put(("console", "Не удалось распознать команду"))
             self.message_queue.put(("speak", "Повторите команду, сэр."))
+    
+    def activate_from_hotword(self, text):
+        """Активация по горячему слову"""
+        # Воспроизвести звук активации
+        play_activation_sound()
+        
+        # Обновить статус
+        self.message_queue.put(("status", "🔴 Активирован по голосу"))
+        
+        # Визуальная индикация
+        self.header_label.configure(foreground="#ff0000")
+        
+        # Обработка команды
+        self.message_queue.put(("console", text, "USER"))
+        
+        # Проверка на режим последовательности
+        if config.get("sequence_mode", False):
+            config["sequence_commands"].append(text)
+            save_config(config)
+            response = f"Команда добавлена в последовательность. Текущее количество: {len(config['sequence_commands'])}"
+            self.message_queue.put(("console", response))
+            self.message_queue.put(("speak", response))
+        else:
+            self.message_queue.put(("process_command", text))
+        
+        # Запланировать восстановление нормального состояния
+        self.root.after(5000, self.deactivate_hotword_state)
+    
+    def deactivate_hotword_state(self):
+        """Возврат к нормальному состоянию после активации"""
+        # Восстановить анимацию заголовка
+        self.animate_header()
+        # Обновить статус
+        self.message_queue.put(("status", "🟢 Ожидание команды"))
     
     def process_queue(self):
         """Обработка сообщений из очереди"""
@@ -791,11 +1444,46 @@ class JarvisGUI:
         
         self.root.after(100, self.process_queue)
     
+    def load_notes(self):
+        """Загрузка заметок в интерфейс"""
+        try:
+            with open(NOTES_FILE, "r", encoding="utf-8") as f:
+                notes = f.read()
+            self.notes_text.delete(1.0, tk.END)
+            self.notes_text.insert(tk.END, notes)
+        except FileNotFoundError:
+            pass
+    
+    def save_notes(self):
+        """Сохранение заметок из интерфейса"""
+        notes = self.notes_text.get(1.0, tk.END)
+        with open(NOTES_FILE, "w", encoding="utf-8") as f:
+            f.write(notes)
+        self.message_queue.put(("console", "Заметки сохранены"))
+        self.message_queue.put(("speak", "Заметки сохранены"))
+    
+    def load_history_list(self):
+        """Загрузка истории команд в список"""
+        self.history = load_history()
+        self.history_list.delete(0, tk.END)
+        if self.history["commands"]:
+            for cmd in self.history["commands"]:
+                timestamp = datetime.datetime.fromisoformat(cmd["timestamp"]).strftime("%Y-%m-%d %H:%M")
+                self.history_list.insert(tk.END, f"{timestamp}: {cmd['command']}")
+    
+    def clear_history(self):
+        """Очистка истории команд"""
+        self.history = {"commands": []}
+        save_history(self.history)
+        self.history_list.delete(0, tk.END)
+        self.message_queue.put(("console", "История команд очищена"))
+        self.message_queue.put(("speak", "История команд очищена"))
+    
     def open_settings(self):
         """Открыть окно настроек"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Настройки Jarvis")
-        dialog.geometry("500x400")
+        dialog.geometry("500x500")
         dialog.configure(bg="#0a0a2a")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -822,13 +1510,40 @@ class JarvisGUI:
         hotword_entry = ttk.Entry(frame, textvariable=self.hotword_var, width=20)
         hotword_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
         
-        ttk.Label(frame, text="API ключ DeepSeek:", font=("Arial", 10)).grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Ваше имя:", font=("Arial", 10)).grid(row=3, column=0, sticky="w", pady=5)
+        self.user_name_var = tk.StringVar(value=config["user_name"])
+        user_name_entry = ttk.Entry(frame, textvariable=self.user_name_var, width=20)
+        user_name_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(frame, text="AI провайдер:", font=("Arial", 10)).grid(row=4, column=0, sticky="w", pady=5)
+        self.ai_provider_var = tk.StringVar(value=config["ai_provider"])
+        ai_provider_combobox = ttk.Combobox(frame, textvariable=self.ai_provider_var, 
+                                          values=["local", "deepseek"], width=18)
+        ai_provider_combobox.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        
+        ttk.Label(frame, text="API ключ DeepSeek:", font=("Arial", 10)).grid(row=5, column=0, sticky="w", pady=5)
         self.api_key_var = tk.StringVar(value=config["deepseek_api_key"])
         api_key_entry = ttk.Entry(frame, textvariable=self.api_key_var, width=30)
-        api_key_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        api_key_entry.grid(row=5, column=1, sticky="ew", padx=5, pady=5)
+        
+        self.learn_var = tk.BooleanVar(value=config.get("learn_from_commands", True))
+        learn_check = ttk.Checkbutton(frame, text="Обучаться на моих командах", 
+                                    variable=self.learn_var)
+        learn_check.grid(row=6, column=0, columnspan=2, pady=5, sticky="w")
+        
+        self.always_listen_var = tk.BooleanVar(value=config.get("always_listen", True))
+        always_listen_check = ttk.Checkbutton(frame, text="Всегда слушать горячее слово", 
+                                            variable=self.always_listen_var)
+        always_listen_check.grid(row=7, column=0, columnspan=2, pady=5, sticky="w")
+        
+        # Настройка пароля
+        ttk.Label(frame, text="Пароль доступа:", font=("Arial", 10)).grid(row=8, column=0, sticky="w", pady=5)
+        self.password_var = tk.StringVar(value=config.get("password", "jarvis"))
+        password_entry = ttk.Entry(frame, textvariable=self.password_var, width=20, show="*")
+        password_entry.grid(row=8, column=1, sticky="ew", padx=5, pady=5)
         
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=15)
         
         ttk.Button(
             btn_frame,
@@ -847,12 +1562,26 @@ class JarvisGUI:
         config["voice_rate"] = self.speed_var.get()
         config["voice_pitch"] = self.pitch_var.get()
         config["hotword"] = self.hotword_var.get()
+        config["user_name"] = self.user_name_var.get()
+        config["ai_provider"] = self.ai_provider_var.get()
         config["deepseek_api_key"] = self.api_key_var.get()
+        config["learn_from_commands"] = self.learn_var.get()
+        config["always_listen"] = self.always_listen_var.get()
+        config["password"] = self.password_var.get()
         save_config(config)
         
         # Переинициализация голоса
         global engine
         engine = setup_jarvis_voice()
+        
+        # Обновление фонового прослушивания
+        if config["always_listen"]:
+            if not hasattr(self, 'background_listener') or not self.background_listener.running:
+                self.background_listener = BackgroundListener(self.activate_from_hotword)
+                self.background_listener.start()
+        else:
+            if hasattr(self, 'background_listener') and self.background_listener.running:
+                self.background_listener.stop()
         
         messagebox.showinfo("Настройки", "Настройки успешно сохранены!")
         dialog.destroy()
@@ -869,7 +1598,7 @@ class JarvisGUI:
         frame = ttk.Frame(dialog)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        ttk.Label(frame, text="Задайте вопрос ИИ:", font=("Arial", 12)).pack(pady=5)
+        ttk.Label(frame, text="Задайте вопрос:", font=("Arial", 12)).pack(pady=5)
         
         self.ai_question = tk.Text(
             frame,
@@ -898,7 +1627,7 @@ class JarvisGUI:
     
     def submit_ai_question(self, dialog):
         """Отправка вопроса к ИИ"""
-        question = self.ai_question.get("1.0", tk.END).strip()
+        question = self.ai_question.get(1.0, tk.END).strip()
         if question:
             self.update_console(question, "USER")
             threading.Thread(
@@ -937,10 +1666,20 @@ class JarvisGUI:
             "Установи громкость [0-100] - Установка уровня громкости",
             "Выключи компьютер - Выключение ПК",
             "Перезагрузи компьютер - Перезагрузка ПК",
+            "Напечатай [текст] - Напечатать текст",
+            "Отправь сообщение [текст] - Отправить сообщение",
+            "Максимизируй окно - Максимизировать текущее окно",
+            "Минимизируй окно - Минимизировать текущее окно",
+            "Переключи окно - Переключить на следующее окно",
+            "Найди файл [имя] - Поиск файла на компьютере",
+            "Запомни что [факт] - Запомнить информацию",
             "Спроси у ИИ [вопрос] - Задать вопрос искусственному интеллекту",
             "История команд - Показать историю команд",
+            "Начать последовательность команд - Активировать режим последовательности",
+            "Завершить последовательность команд - Завершить режим последовательности",
+            "Отмени команду - Отменить последнюю команду в последовательности",
             "Что ты умеешь? - Список команд",
-            "Стоп - Завершение работы"
+            "Стоп - Завернение работы"
         ]
         
         dialog = tk.Toplevel(self.root)
@@ -983,8 +1722,10 @@ class JarvisGUI:
         """Обработка команды"""
         response, self.history = handle_command(command, self.history)
         
-        if response == "exit":
-            self.message_queue.put(("speak", "Завершение работы системы. До свидания, сэр."))
+        if response.startswith("exit||"):
+            farewell = response.split("||")[1]
+            play_deactivation_sound()
+            self.message_queue.put(("speak", farewell))
             self.message_queue.put(("exit",))
             return
         
@@ -994,18 +1735,50 @@ class JarvisGUI:
 # ===== Запуск приложения =====
 if __name__ == "__main__":
     root = tk.Tk()
-    app = JarvisGUI(root)
+    root.withdraw()  # Скрываем основное окно до входа
     
-    # Проверка микрофона
+    # Создаем splash screen
+    splash = SplashScreen(root)
+    splash.update_status("Загрузка конфигурации...")
+    time.sleep(1)  # Имитация загрузки
+    
+    splash.update_status("Инициализация голосового движка...")
+    # Инициализация голосового движка
+    try:
+        engine = setup_jarvis_voice()
+        splash.update_status("Голосовой движок готов")
+    except Exception as e:
+        splash.update_status(f"Ошибка инициализации голоса: {str(e)}")
+    time.sleep(1)
+    
+    splash.update_status("Проверка микрофона...")
+    mic_available = True
     try:
         import pyaudio
         p = pyaudio.PyAudio()
         if p.get_device_count() < 1:
-            app.message_queue.put(("console", "> ВНИМАНИЕ: Микрофон не найден. Голосовые команды недоступны"))
-            app.message_queue.put(("speak", "Внимание: микрофон не обнаружен. Используйте текстовые команды."))
+            mic_available = False
         p.terminate()
     except ImportError:
-        app.message_queue.put(("console", "> ВНИМАНИЕ: PyAudio не установлен. Голосовые команды недоступны"))
-        app.message_queue.put(("speak", "Внимание: микрофон недоступен. Используйте текстовые команды."))
+        mic_available = False
+    time.sleep(1)
+    
+    # Инициализация основного интерфейса
+    splash.update_status("Запуск интерфейса...")
+    app = JarvisGUI(root)
+    
+    # Закрываем splash screen
+    time.sleep(1)
+    splash.destroy()
+    
+    # Показываем экран входа
+    def on_login_success():
+        root.deiconify()  # Показываем основное окно
+        # Проверка микрофона
+        if not mic_available:
+            app.message_queue.put(("console", "> ВНИМАНИЕ: Микрофон не найден. Голосовые команды недоступны"))
+            app.message_queue.put(("speak", "Внимание: микрофон не обнаружен. Используйте текстовые команды."))
+    
+    login_screen = LoginScreen(root, on_login_success)
     
     root.mainloop()
