@@ -333,7 +333,11 @@ def ask_deepseek(prompt):
 
 # ===== Улучшенная настройка голоса Jarvis =====
 def setup_jarvis_voice():
-    engine = pyttsx3.init()
+    try:
+        engine = pyttsx3.init()
+    except Exception as e:
+        print(f"Ошибка инициализации pyttsx3: {e}")
+        return None
     
     # Найдем лучший голос для Jarvis
     voices = engine.getProperty('voices')
@@ -345,7 +349,9 @@ def setup_jarvis_voice():
         'zira', 'igor', 'aleksandr', 'pavel', 'anat', 'milena'
     ]
     
+    print("Доступные голоса:")
     for voice in voices:
+        print(f" - {voice.name} (ID: {voice.id})")
         for name in preferred_voices:
             if name in voice.name.lower():
                 jarvis_voice = voice.id
@@ -382,7 +388,14 @@ def speak(text):
     """Озвучивание текста с эффектом Jarvis"""
     global engine
     if engine is None:
-        engine = setup_jarvis_voice()
+        try:
+            engine = setup_jarvis_voice()
+            if engine is None:
+                print("Не удалось инициализировать голосовой движок")
+                return
+        except Exception as e:
+            print(f"Ошибка инициализации голоса: {e}")
+            return
     
     print(f"JARVIS: {text}")
     
@@ -392,8 +405,7 @@ def speak(text):
         for phrase in phrases:
             if phrase.strip():
                 engine.say(phrase.strip())
-                engine.runAndWait()
-                time.sleep(0.12)  # Короткая пауза между фразами
+        engine.runAndWait()
     except Exception as e:
         print(f"Ошибка синтеза речи: {e}")
 
@@ -975,135 +987,6 @@ def handle_command_internal(command, history):
     else:
         return ask_ai(command), history
 
-# ===== ЭКРАН ЗАГРУЗКИ =====
-class SplashScreen:
-    def __init__(self, master):
-        self.master = master
-        self.window = tk.Toplevel(master)
-        self.window.title("J.A.R.V.I.S. Loading")
-        self.window.geometry("400x300")
-        self.window.overrideredirect(True)  # Убираем рамки окна
-        screen_width = self.window.winfo_screenwidth()
-        screen_height = self.window.winfo_screenheight()
-        x = (screen_width - 400) // 2
-        y = (screen_height - 300) // 2
-        self.window.geometry(f"400x300+{x}+{y}")
-        self.window.configure(bg="#0a0a2a")
-        
-        # Логотип
-        self.logo = ttk.Label(
-            self.window, 
-            text="J.A.R.V.I.S.", 
-            font=("Arial", 28, "bold"),
-            foreground="#00ccff",
-            background="#0a0a2a"
-        )
-        self.logo.pack(pady=50)
-        
-        # Индикатор загрузки
-        self.progress = ttk.Progressbar(
-            self.window,
-            orient="horizontal",
-            length=300,
-            mode="indeterminate"
-        )
-        self.progress.pack(pady=20)
-        self.progress.start(10)
-        
-        # Статус загрузки
-        self.status = ttk.Label(
-            self.window,
-            text="Инициализация системы...",
-            font=("Arial", 10),
-            foreground="#00ff00",
-            background="#0a0a2a"
-        )
-        self.status.pack(pady=10)
-        
-    def update_status(self, text):
-        self.status.config(text=text)
-        self.window.update()
-        
-    def destroy(self):
-        self.window.destroy()
-
-# ===== ЭКРАН ВХОДА =====
-class LoginScreen:
-    def __init__(self, master, on_login_success):
-        self.master = master
-        self.on_login_success = on_login_success
-        self.window = tk.Toplevel(master)
-        self.window.title("J.A.R.V.I.S. - Вход")
-        self.window.geometry("400x300")
-        self.window.configure(bg="#0a0a2a")
-        self.window.transient(master)
-        self.window.grab_set()
-        self.window.protocol("WM_DELETE_WINDOW", self.master.destroy)
-        
-        screen_width = self.window.winfo_screenwidth()
-        screen_height = self.window.winfo_screenheight()
-        x = (screen_width - 400) // 2
-        y = (screen_height - 300) // 2
-        self.window.geometry(f"400x300+{x}+{y}")
-        
-        # Заголовок
-        ttk.Label(
-            self.window, 
-            text="J.A.R.V.I.S.", 
-            font=("Arial", 24, "bold"),
-            foreground="#00ccff",
-            background="#0a0a2a"
-        ).pack(pady=20)
-        
-        # Поля ввода
-        frame = ttk.Frame(self.window)
-        frame.pack(pady=20)
-        
-        ttk.Label(
-            frame, 
-            text="Пароль:", 
-            font=("Arial", 12),
-            foreground="#ffffff",
-            background="#0a0a2a"
-        ).grid(row=0, column=0, padx=5, pady=10)
-        
-        self.password_var = tk.StringVar()
-        self.password_entry = ttk.Entry(
-            frame, 
-            textvariable=self.password_var, 
-            show="*", 
-            width=20,
-            font=("Arial", 12)
-        )
-        self.password_entry.grid(row=0, column=1, padx=5, pady=10)
-        self.password_entry.bind("<Return>", self.check_password)
-        
-        # Кнопка входа
-        ttk.Button(
-            self.window,
-            text="Войти",
-            command=self.check_password,
-            width=15
-        ).pack(pady=10)
-        
-        # Статус
-        self.status_var = tk.StringVar()
-        ttk.Label(
-            self.window, 
-            textvariable=self.status_var,
-            foreground="#ff0000",
-            background="#0a0a2a",
-            font=("Arial", 10)
-        ).pack(pady=5)
-        
-    def check_password(self, event=None):
-        password = self.password_var.get()
-        if password == config.get("password", "jarvis"):
-            self.window.destroy()
-            self.on_login_success()
-        else:
-            self.status_var.set("Неверный пароль")
-
 # ===== Графический интерфейс Jarvis =====
 class JarvisGUI:
     def __init__(self, root):
@@ -1111,6 +994,9 @@ class JarvisGUI:
         self.root.title(f"J.A.R.V.I.S. - Just A Rather Very Intelligent System")
         self.root.geometry("900x700")
         self.root.configure(bg="#0a0a2a")
+        
+        # Инициализация голосового движка
+        threading.Thread(target=self.initialize_voice, daemon=True).start()
         
         # Загрузка истории
         self.history = load_history()
@@ -1149,6 +1035,15 @@ class JarvisGUI:
         self.background_listener = BackgroundListener(self.activate_from_hotword)
         if config.get("always_listen", True):  # Используем безопасное получение значения
             self.background_listener.start()
+    
+    def initialize_voice(self):
+        """Инициализация голосового движка в фоновом потоке"""
+        global engine
+        try:
+            engine = setup_jarvis_voice()
+            self.message_queue.put(("console", "Голосовой движок успешно инициализирован"))
+        except Exception as e:
+            self.message_queue.put(("console", f"Ошибка инициализации голосового движка: {e}"))
     
     def create_widgets(self):
         # Главный фрейм
@@ -1328,7 +1223,7 @@ class JarvisGUI:
             text="Очистить",
             command=self.clear_history
         ).pack(side=tk.RIGHT, padx=5)
-        
+    
     def animate_header(self):
         """Анимация заголовка в стиле Jarvis"""
         colors = ["#00ccff", "#00aaff", "#0088ff", "#0066cc", "#0088ff", "#00aaff"]
@@ -1572,7 +1467,10 @@ class JarvisGUI:
         
         # Переинициализация голоса
         global engine
-        engine = setup_jarvis_voice()
+        try:
+            engine = setup_jarvis_voice()
+        except Exception as e:
+            self.message_queue.put(("console", f"Ошибка переинициализации голоса: {e}"))
         
         # Обновление фонового прослушивания
         if config["always_listen"]:
@@ -1734,51 +1632,19 @@ class JarvisGUI:
 
 # ===== Запуск приложения =====
 if __name__ == "__main__":
+    # Скрываем консоль для Windows
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL('kernel32')
+            user32 = ctypes.WinDLL('user32')
+            SW_HIDE = 0
+            hWnd = kernel32.GetConsoleWindow()
+            if hWnd:
+                user32.ShowWindow(hWnd, SW_HIDE)
+        except:
+            pass
+
     root = tk.Tk()
-    root.withdraw()  # Скрываем основное окно до входа
-    
-    # Создаем splash screen
-    splash = SplashScreen(root)
-    splash.update_status("Загрузка конфигурации...")
-    time.sleep(1)  # Имитация загрузки
-    
-    splash.update_status("Инициализация голосового движка...")
-    # Инициализация голосового движка
-    try:
-        engine = setup_jarvis_voice()
-        splash.update_status("Голосовой движок готов")
-    except Exception as e:
-        splash.update_status(f"Ошибка инициализации голоса: {str(e)}")
-    time.sleep(1)
-    
-    splash.update_status("Проверка микрофона...")
-    mic_available = True
-    try:
-        import pyaudio
-        p = pyaudio.PyAudio()
-        if p.get_device_count() < 1:
-            mic_available = False
-        p.terminate()
-    except ImportError:
-        mic_available = False
-    time.sleep(1)
-    
-    # Инициализация основного интерфейса
-    splash.update_status("Запуск интерфейса...")
     app = JarvisGUI(root)
-    
-    # Закрываем splash screen
-    time.sleep(1)
-    splash.destroy()
-    
-    # Показываем экран входа
-    def on_login_success():
-        root.deiconify()  # Показываем основное окно
-        # Проверка микрофона
-        if not mic_available:
-            app.message_queue.put(("console", "> ВНИМАНИЕ: Микрофон не найден. Голосовые команды недоступны"))
-            app.message_queue.put(("speak", "Внимание: микрофон не обнаружен. Используйте текстовые команды."))
-    
-    login_screen = LoginScreen(root, on_login_success)
-    
     root.mainloop()
