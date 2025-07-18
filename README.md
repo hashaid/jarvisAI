@@ -1,2 +1,2 @@
 # jarvisAI
-my AI assistent from pc
+my AI assistent from pc 
